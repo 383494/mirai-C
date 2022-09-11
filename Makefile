@@ -4,7 +4,7 @@
 
 BIN = main
 CC = gcc
-CFLAGS = -Wall -lcurl -lcjson -g
+CFLAGS = -Wall -lcurl -lcjson -lpthread -g
 RM = rm
 OBJ = main.o miraiBot.o
 
@@ -17,4 +17,4 @@ miraiBot.o: miraiBot.c miraiBot.h
 
 .PHONY: clean
 clean:
-	$(RM) $(OBJ) $(BIN)
+	- $(RM) $(OBJ) $(BIN)

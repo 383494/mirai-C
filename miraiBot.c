@@ -1,5 +1,9 @@
+// TODO: perror
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include "miraiBot.h"
@@ -71,6 +75,68 @@ cJSON *HttpGet(const char *url){
 	return ret;
 }
 
+pthread_rwlock_t *rwlock;
+
+static void *botMain(void *botptr){
+	M_Bot *bot = (M_Bot*)botptr;
+	pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+	pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+	cJSON *retMsg, *newMsg;
+	bool running = true;
+	while(running){
+		pthread_testcancel();
+
+		retMsg = M_fetchMsg(bot);
+		newMsg = cJSON_GetArrayItem(cJSON_GetObjectItem(retMsg, "data"), 0);
+		do{
+
+		if(newMsg == NULL){
+			sleep(1);
+//			usleep(50 *1000);
+			break;
+		}
+		if(bot->onGrpMsg != NULL &&
+				strcmp(cJSON_GetObjectItem(newMsg, "type")->valuestring, "GroupMessage") == 0){
+			bot->onGrpMsg(bot, newMsg);
+		} else if(bot->onFriendMsg != NULL &&
+				strcmp(cJSON_GetObjectItem(newMsg, "type")->valuestring, "FriendMessage") == 0){
+			bot->onFriendMsg(bot, newMsg);
+		}
+
+
+		}while(0);
+		cJSON_Delete(retMsg);
+
+/*
+		pthread_mutex_lock(&mutex);
+		if(mail[0] == 1 && mail[1] == 1){
+			running = false;
+		}
+		pthread_mutex_unlock(&mutex);
+*/
+
+	}
+	return NULL;
+}
+
+int M_botStart(M_Bot *bot){
+	if(bot->thrd != NULL){
+		return 1;	// bot has been start
+	}
+	bot->thrd = malloc(sizeof(pthread_t));
+	if(pthread_create(bot->thrd, NULL, botMain, bot) != 0){
+		free(bot->thrd);
+		bot->thrd = NULL;
+		M_logError("error creating thread");
+		return -1;
+	}
+	return 0;
+}
+
+inline int M_botStop(M_Bot *bot){
+	return pthread_cancel(*bot->thrd);
+}
+
 M_Bot* M_createBot(QQ_t qqnum, const char *serverAddr, const char *verifyKey){
 	M_Bot *bot = (M_Bot*)malloc(sizeof(M_Bot));
 	bot->addrlen = strlen(serverAddr);
@@ -81,10 +147,20 @@ M_Bot* M_createBot(QQ_t qqnum, const char *serverAddr, const char *verifyKey){
 	cJSON_AddStringToObject(pdata, "verifyKey", verifyKey);
 	strcpy(bot->serverAddr + bot->addrlen, "/verify");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	cJSON_Delete(pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		free(bot->serverAddr);
+		free(bot);
+		return NULL;
+	}
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in verify: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(rdata);
+		free(bot->serverAddr);
+		free(bot);
+		return NULL;
 	}
-	cJSON_Delete(pdata);
 	bot->session = (char*)malloc(sizeof(char)*(strlen(cJSON_GetObjectItem(rdata, "session")->valuestring)+1));
 	strcpy(bot->session, cJSON_GetObjectItem(rdata, "session")->valuestring);
 	cJSON_Delete(rdata);
@@ -94,11 +170,26 @@ M_Bot* M_createBot(QQ_t qqnum, const char *serverAddr, const char *verifyKey){
 	cJSON_AddNumberToObject(pdata, "qq", (double)getQQ(bot->qqnum));
 	strcpy(bot->serverAddr + bot->addrlen, "/bind");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	cJSON_Delete(pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		free(bot->serverAddr);
+		free(bot->session);
+		free(bot);
+		return NULL;
+	}
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in bind: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(rdata);
+		free(bot->serverAddr);
+		free(bot->session);
+		free(bot);
+		return NULL;
 	}
-	cJSON_Delete(pdata);
 	cJSON_Delete(rdata);
+	bot->thrd = NULL;
+	bot->onGrpMsg = NULL;
+	bot->onFriendMsg = NULL;
 
 	return bot;
 }
@@ -109,13 +200,28 @@ void M_deleteBot(M_Bot *bot){
 	cJSON_AddNumberToObject(pdata, "qq", (double)getQQ(bot->qqnum));
 	strcpy(bot->serverAddr + bot->addrlen, "/release");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		cJSON_Delete(pdata);
+		free(bot->serverAddr);
+		free(bot->session);
+		free(bot);
+		return;
+	} 
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in release: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(pdata);
+		cJSON_Delete(rdata);
+		free(bot->serverAddr);
+		free(bot->session);
+		free(bot);
+		return;
 	}
 	cJSON_Delete(pdata);
 	cJSON_Delete(rdata);
 	free(bot->serverAddr);
 	free(bot->session);
+	free(bot->thrd);
 	free(bot);
 }
 
@@ -168,11 +274,17 @@ int M_sendFriendMsg(M_Bot *bot, QQ_t frd, msgChain *msg){
 
 	strcpy(bot->serverAddr + bot->addrlen, "/sendFriendMessage");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	cJSON_Delete(pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		return M_HTTP_ERROR_INT;
+	}
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in sending friendmsg: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(rdata);
+		return M_HTTP_ERROR_INT;
 	}
 	int ret = cJSON_GetObjectItem(rdata, "messageId")->valueint;
-	cJSON_Delete(pdata);
 	cJSON_Delete(rdata);
 	return ret;
 }
@@ -185,11 +297,17 @@ int M_sendGroupMsg(M_Bot *bot, GID_t grp, msgChain *msg){
 
 	strcpy(bot->serverAddr + bot->addrlen, "/sendGroupMessage");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	cJSON_Delete(pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		return M_HTTP_ERROR_INT;
+	}
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in sending groupmsg: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(rdata);
+		return M_HTTP_ERROR_INT;
 	}
 	int ret = cJSON_GetObjectItem(rdata, "messageId")->valueint;
-	cJSON_Delete(pdata);
 	cJSON_Delete(rdata);
 	return ret;
 }
@@ -203,11 +321,17 @@ int M_replyGroupMsg(M_Bot *bot, GID_t grp, int quoteMsgId, msgChain *msg){
 
 	strcpy(bot->serverAddr + bot->addrlen, "/sendGroupMessage");
 	rdata = HttpPost(bot->serverAddr, pdata);
+	cJSON_Delete(pdata);
+	if(rdata == NULL){
+		M_logError("Http Post return NULL");
+		return M_HTTP_ERROR_INT;
+	}
 	if(cJSON_GetObjectItem(rdata, "code")->valueint != 0){
 		M_logError("Error post value in sending groupmsg: %d", cJSON_GetObjectItem(rdata, "code")->valueint);
+		cJSON_Delete(rdata);
+		return M_HTTP_ERROR_INT;
 	}
 	int ret = cJSON_GetObjectItem(rdata, "messageId")->valueint;
-	cJSON_Delete(pdata);
 	cJSON_Delete(rdata);
 	return ret;
 }

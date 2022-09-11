@@ -1,5 +1,6 @@
 #pragma once
-#define M_logError(str,...) fprintf(stderr, "File %s Func %s Line %d\n" str,__FILE__, __func__, __LINE__, __VA_ARGS__)
+#define M_logError(str,...) fprintf(stderr, "File %s Func %s Line %d\n" str,__FILE__, __func__, __LINE__, ##__VA_ARGS__)
+#define M_HTTP_ERROR_INT -1
 
 typedef struct QQ_t{
 	long long qq;
@@ -17,14 +18,21 @@ static inline long long getGID(GID_t gnu){
 	return gnu.gid;
 }
 
-typedef struct M_Bot{
+typedef cJSON msgChain;
+
+typedef struct M_Bot M_Bot;
+struct M_Bot{
 	char *serverAddr;
 	int addrlen;
 	char *session;
 	QQ_t qqnum;
-} M_Bot;
+	pthread_t *thrd;
 
-typedef cJSON msgChain;
+	// TODO: add more func
+	int (*onGrpMsg)(M_Bot*, msgChain*);
+	int (*onFriendMsg)(M_Bot*, msgChain*);	
+};
+
 
 // https://docs.mirai.mamoe.net/mirai-api-http/api/MessageType.html#plain
 /*
@@ -72,6 +80,9 @@ char *MSGTSTR[] = {
 */
 
 M_Bot* M_createBot(QQ_t qqnum, const char *serverAddr, const char *verifyKey);
+#define M_regBotCBFunc(bot, name, func) ((bot)->name = func)
+int M_botStart(M_Bot *bot);
+int M_botStop(M_Bot *bot);
 void M_deleteBot(M_Bot *bot);
 
 msgChain *Msg_new();
